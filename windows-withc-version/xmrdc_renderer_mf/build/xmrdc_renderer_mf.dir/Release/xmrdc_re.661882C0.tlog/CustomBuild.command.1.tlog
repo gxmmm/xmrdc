@@ -1,0 +1,10 @@
+^D:\PROJECTCODE\XMRDC\WINDOWS-WITHC-VERSION\XMRDC_RENDERER_MF\CMAKELISTS.TXT
+setlocal
+"C:\Program Files\CMake\bin\cmake.exe" -SD:/projectCode/xmrdc/windows-withc-version/xmrdc_renderer_mf -BD:/projectCode/xmrdc/windows-withc-version/xmrdc_renderer_mf/build --check-stamp-file D:/projectCode/xmrdc/windows-withc-version/xmrdc_renderer_mf/build/CMakeFiles/generate.stamp
+if %errorlevel% neq 0 goto :cmEnd
+:cmEnd
+endlocal & call :cmErrorLevel %errorlevel% & goto :cmDone
+:cmErrorLevel
+exit /b %1
+:cmDone
+if %errorlevel% neq 0 goto :VCEnd

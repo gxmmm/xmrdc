@@ -1,0 +1,37 @@
+C++渲染器构建说明 (Windows原生版本)
+==================
+
+前置要求:
+---------
+1. Visual Studio 2019 或更高版本
+2. CMake 3.10 或更高版本
+3. Windows 10 或更高版本 (支持Media Foundation)
+
+构建步骤:
+---------
+1. 创建构建目录:
+   mkdir build
+   cd build
+
+2. 配置CMake:
+   cmake ..
+
+3. 编译:
+   cmake --build . --config Release
+
+4. 生成的可执行文件位于:
+   build/Release/xmrdc_renderer_mf.exe
+   同时会自动复制到上级目录
+
+运行:
+-----
+将生成的 xmrdc_renderer_mf.exe 放在与 client.py 相同的目录下，
+然后运行 client.py 即可。
+
+注意事项:
+---------
+1. 本版本使用Windows原生Media Foundation API，无需额外依赖
+2. 共享内存名称必须与Python代码中的一致
+3. 窗口句柄由Python传递，确保Python窗口已创建
+4. 仅支持Windows 10及更高版本
+5. 建议以管理员权限运行，以确保共享内存访问权限
