@@ -11,6 +11,15 @@ import os
 import ctypes
 import mmap
 
+# 处理DPI缩放问题
+if platform.system() == 'Windows':
+    try:
+        # 设置DPI感知
+        ctypes.windll.shcore.SetProcessDpiAwareness(2)  # PROCESS_PER_MONITOR_DPI_AWARE
+        print("[优化] Windows DPI感知已设置为每监视器感知")
+    except Exception as e:
+        print(f"[优化] Windows DPI感知设置失败: {e}")
+
 # Windows特定优化
 if platform.system() == 'Windows':
     try:
@@ -193,10 +202,10 @@ class P2PControllerApp:
                 pkt_type = struct.unpack('!I', data[:4])[0]
                 
                 if pkt_type == FRAME_TYPE_HEADER:
-                    if len(data) < 12: continue
-                    fid, total_size = struct.unpack('!II', data[4:12])
+                    if len(data) < 14: continue
+                    fid, total_size, total_chunks = struct.unpack('!IIH', data[4:14])
                     
-                    print(f"[Python] Received FRAME_TYPE_HEADER: fid={fid}, total_size={total_size} bytes")
+                    print(f"[Python] Received FRAME_TYPE_HEADER: fid={fid}, total_size={total_size} bytes, total_chunks={total_chunks}")
                     
                     # === 低延迟优化：丢弃旧帧 ===
                     # 如果收到的帧ID比当前处理的帧ID大很多，说明中间有帧丢失
@@ -205,21 +214,21 @@ class P2PControllerApp:
                         print(f"[丢弃] 跳帧: {latest_fid} -> {fid}")
                         latest_fid = fid
                         with self.frame_lock:
-                            self.frame_buffers = {fid: {'data': bytearray(total_size), 'recvd_len': 0, 'total_len': total_size}}
+                            self.frame_buffers = {fid: {'data': bytearray(total_size), 'recvd_len': 0, 'total_len': total_size, 'total_chunks': total_chunks, 'received_chunks': set(), 'timestamp': time.time()}}
                             print(f"[Python] Created new frame buffer for fid={fid}")
                     elif fid != latest_fid:
                         with self.frame_lock:
-                            self.frame_buffers = {fid: {'data': bytearray(total_size), 'recvd_len': 0, 'total_len': total_size}}
+                            self.frame_buffers = {fid: {'data': bytearray(total_size), 'recvd_len': 0, 'total_len': total_size, 'total_chunks': total_chunks, 'received_chunks': set(), 'timestamp': time.time()}}
                             print(f"[Python] Created frame buffer for fid={fid}")
                         latest_fid = fid
                     continue
 
                 elif pkt_type == FRAME_TYPE_DATA:
-                    if len(data) < 14: continue
-                    fid, total_size, chunk_idx = struct.unpack('!IIH', data[4:14])
-                    chunk_data = data[14:]
+                    if len(data) < 16: continue
+                    fid, total_size, chunk_idx, total_chunks = struct.unpack('!IIHH', data[4:16])
+                    chunk_data = data[16:]
                     
-                    print(f"[Python] Received FRAME_TYPE_DATA: fid={fid}, chunk_idx={chunk_idx}, chunk_size={len(chunk_data)} bytes")
+                    print(f"[Python] Received FRAME_TYPE_DATA: fid={fid}, chunk_idx={chunk_idx}/{total_chunks}, chunk_size={len(chunk_data)} bytes")
                     
                     if fid == latest_fid:
                         with self.frame_lock:
@@ -228,16 +237,22 @@ class P2PControllerApp:
                                 continue
                             obj = self.frame_buffers[fid]
                             
+                            # 检查分片是否已接收（避免重复）
+                            if chunk_idx in obj['received_chunks']:
+                                continue
+                            
                             start_pos = chunk_idx * MTU_SIZE
                             if start_pos + len(chunk_data) <= len(obj['data']):
                                 obj['data'][start_pos : start_pos + len(chunk_data)] = chunk_data
                                 obj['recvd_len'] += len(chunk_data)
-                                print(f"[Python] Updated frame {fid}: recvd_len={obj['recvd_len']}/{obj['total_len']} bytes")
+                                obj['received_chunks'].add(chunk_idx)
+                                print(f"[Python] Updated frame {fid}: recvd_len={obj['recvd_len']}/{obj['total_len']} bytes, chunks={len(obj['received_chunks'])}/{obj['total_chunks']}")
                             else:
                                 print(f"[Python] Chunk out of bounds: start_pos={start_pos}, chunk_size={len(chunk_data)}, buffer_size={len(obj['data'])}")
                             
-                            if obj['recvd_len'] >= obj['total_len']:
-                                print(f"[Python] Received complete frame: fid={fid}, size={obj['total_len']} bytes")
+                            # 检查是否接收完整（基于分片数和总大小）
+                            if len(obj['received_chunks']) == obj['total_chunks'] and obj['recvd_len'] >= obj['total_len']:
+                                print(f"[Python] Received complete frame: fid={fid}, size={obj['total_len']} bytes, chunks={len(obj['received_chunks'])}")
                                 # === 写入共享内存 ===
                                 try:
                                     self.write_to_shared_memory(obj['data'], fid, obj['total_len'])
@@ -272,15 +287,14 @@ class P2PControllerApp:
         print(f"[Python] write_to_shared_memory called: fid={fid}, total_len={total_len}, data_size={len(h264_data)} bytes")
         
         with self.shm_lock:
-            if self.shm_buffer is None:
-                print("[Python] shm_buffer is None, skipping write")
+            if self.shm is None:
+                print("[Python] shm is None, skipping write")
                 return
             
-            # 写入帧头：帧ID + 数据长度
-            header = struct.pack('!II', fid, total_len)
-            data_size = len(header) + len(h264_data)
+            # 计算总数据大小：4字节data_size + 8字节header + 数据长度
+            data_size = 4 + 8 + len(h264_data)
             
-            print(f"[Python] Writing to shared memory: header_size={len(header)} bytes, total_size={data_size} bytes")
+            print(f"[Python] Writing to shared memory: header_size=8 bytes, total_size={data_size} bytes")
             
             # 检查共享内存是否有足够空间
             if data_size > self.shm_size:
@@ -289,11 +303,24 @@ class P2PControllerApp:
             
             # 写入数据
             try:
-                self.shm_buffer[:len(header)] = header
-                self.shm_buffer[len(header):len(header)+len(h264_data)] = h264_data
+                # 定位到共享内存开头
+                self.shm.seek(0)
                 
-                # 更新数据大小标记（前4字节）
-                struct.pack_into('!I', self.shm_buffer, 0, data_size)
+                # 写入data_size（4字节，网络字节序）
+                self.shm.write(struct.pack('!I', data_size))
+                
+                # 写入fid（4字节，网络字节序）
+                self.shm.write(struct.pack('!I', fid))
+                
+                # 写入total_len（4字节，网络字节序）
+                self.shm.write(struct.pack('!I', total_len))
+                
+                # 写入H264数据
+                self.shm.write(h264_data)
+                
+                # 确保数据被写入
+                self.shm.flush()
+                
                 print(f"[Python] Successfully wrote frame {fid} to shared memory")
             except Exception as e:
                 print(f"[Python] Error writing to shared memory: {e}")
@@ -302,6 +329,51 @@ class P2PControllerApp:
         while self.running and self.connected:
             self.udp_socket.sendto(b"HEARTBEAT", self.target_addr)
             time.sleep(1.0)
+
+
+    def test_shared_memory(self):
+        """测试共享内存读取"""
+        print("[Python] Starting shared memory test...")
+        
+        with self.shm_lock:
+            if self.shm is None:
+                print("[Python] shm is None, skipping test")
+                return
+            
+            # 读取测试数据
+            self.shm.seek(0)
+            data = self.shm.read(1024)
+            if len(data) >= 12:
+                data_size = struct.unpack('!I', data[:4])[0]
+                fid = struct.unpack('!I', data[4:8])[0]
+                frame_size = struct.unpack('!I', data[8:12])[0]
+                
+                if data_size > 12 and len(data) >= 12 + frame_size:
+                    test_data = data[12:12+frame_size].decode('utf-8', errors='ignore')
+                else:
+                    test_data = ""
+                
+                print(f"[Python] Read test data: data_size={data_size}, fid={fid}, frame_size={frame_size}, data='{test_data}'")
+                
+                # 检查是否是C++端的测试数据
+                if fid == 9999 and test_data == "HELLO_TEST":
+                    print("[Python] Shared memory test PASSED! Received C++ test data.")
+                    
+                    # 回复测试数据
+                    reply_data = "PYTHON_REPLY"
+                    reply_size = 8 + len(reply_data)
+                    header = struct.pack('!II', 8888, len(reply_data))
+                    full_reply = struct.pack('!I', reply_size) + header + reply_data.encode()
+                    
+                    self.shm.seek(0)
+                    self.shm.write(full_reply)
+                    self.shm.flush()
+                    
+                    print("[Python] Sent reply to C++: 'PYTHON_REPLY'")
+                else:
+                    print("[Python] No C++ test data found, waiting...")
+            else:
+                print("[Python] Not enough data in shared memory for test")
 
     def show_desktop_ui(self):
         # 根据选择的分辨率设置窗口大小
@@ -323,9 +395,18 @@ class P2PControllerApp:
         
         # 初始化共享内存
         self.init_shared_memory()
+
+        # 测试共享内存
+        threading.Thread(target=self.test_shared_memory, daemon=True).start()
         
         # 启动C++渲染进程
         self.start_cpp_renderer()
+        
+        # 立即发送分辨率设置到被控端
+        if self.connected:
+            cmd = json.dumps({'type': 'resolution', 'width': width, 'height': height})
+            self.udp_socket.sendto(cmd.encode(), self.target_addr)
+            print(f"[UI] 已发送分辨率设置: {width}x{height}")
         
         # 顶部栏（悬浮显示，默认隐藏）
         self.top_bar = tk.Frame(self.root, bg="#333", height=30, relief=tk.RAISED, bd=1)
@@ -398,6 +479,7 @@ class P2PControllerApp:
         print(f"[提示] 当前分辨率: {self.selected_resolution}")
         print("[提示] 鼠标悬停顶部显示分辨率切换")
         print("[提示] C++渲染进程已启动")
+        print("[提示] 顶部栏由Python处理，C++只负责远程桌面画面")
 
     def init_shared_memory(self):
         """初始化共享内存"""
@@ -406,17 +488,14 @@ class P2PControllerApp:
             if platform.system() == 'Windows':
                 # 创建共享内存
                 self.shm = mmap.mmap(-1, self.shm_size, tagname=self.shm_name)
-                self.shm_buffer = bytearray(self.shm_size)
                 print(f"[共享内存] 已创建: {self.shm_name}, 大小: {self.shm_size} bytes")
             else:
                 # Linux共享内存
                 self.shm = mmap.mmap(-1, self.shm_size)
-                self.shm_buffer = bytearray(self.shm_size)
                 print(f"[共享内存] 已创建, 大小: {self.shm_size} bytes")
         except Exception as e:
             print(f"[共享内存] 初始化失败: {e}")
             self.shm = None
-            self.shm_buffer = None
     
     def start_cpp_renderer(self):
         """启动C++渲染进程"""
@@ -486,13 +565,22 @@ class P2PControllerApp:
     def send_resolution_to_cpp(self, width, height):
         """发送分辨率更新到C++进程"""
         with self.shm_lock:
-            if self.shm_buffer is None:
+            if self.shm is None:
                 return
             
             # 使用特殊命令标记分辨率更新
-            # 命令格式: 0xFFFFFFFF + width + height
-            cmd = struct.pack('!III', 0xFFFFFFFF, width, height)
-            self.shm_buffer[:12] = cmd
+            # 命令格式: 4字节data_size + 4字节命令(0xFFFFFFFF) + 4字节宽度 + 4字节高度
+            # 总大小为16字节
+            data_size = 12  # 4字节命令 + 4字节宽度 + 4字节高度
+            self.shm.seek(0)
+            # 写入数据大小
+            self.shm.write(struct.pack('!I', data_size))
+            # 写入命令
+            self.shm.write(struct.pack('!I', 0xFFFFFFFF))
+            # 写入宽度和高度
+            self.shm.write(struct.pack('!II', width, height))
+            self.shm.flush()
+            print(f"[Python] Sent resolution update to C++: {width}x{height}")
 
     def print_perf_stats(self):
         """打印详细的性能统计信息"""

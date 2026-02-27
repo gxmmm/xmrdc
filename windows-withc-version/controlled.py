@@ -32,6 +32,7 @@ def capture_process_task(shm_array, current_size, ready_flag, bitrate, max_fps, 
     
     try:
         import dxcam
+        import cv2
         camera = dxcam.create(output_color="BGR")
         camera.start(target_fps=max_fps, video_mode=True)
         frame = camera.get_latest_frame()
@@ -47,56 +48,103 @@ def capture_process_task(shm_array, current_size, ready_flag, bitrate, max_fps, 
         return
 
     try:
-        container = av.open('dummy.mpegts', 'w', format='mpegts')
-        stream = container.add_stream('h264', rate=max_fps)
-        stream.width = width
-        stream.height = height
-        stream.pix_fmt = 'yuv420p'
-        stream.bit_rate = bitrate * 1000
-        stream.options = {
+        # 使用裸H264编码器，避免mpegts格式问题
+        codec = av.CodecContext.create('h264', 'w')
+        codec.width = width
+        codec.height = height
+        codec.pix_fmt = 'yuv420p'
+        codec.bit_rate = bitrate * 1000
+        # 直接设置帧率，不使用av.Rational
+        codec.framerate = max_fps
+        codec.options = {
             'preset': 'ultrafast',
             'tune': 'zerolatency',
-            'g': '15',
+            'g': '1',  # 全I帧，确保SPS/PPS稳定
             'bf': '0',
             'rc-lookahead': '0',
         }
-        print(f"[子进程] Encoder OK")
+        codec.open()
+        print(f"[子进程] Encoder OK: {width}x{height} (全I帧模式)")
     except Exception as e:
         print(f"[子进程错误] Encoder: {e}")
         return
 
     last_stats = time.time()
     frame_count = 0
+    frame_counter = 0  # 用于强制关键帧
+    
+    # 收集完整帧的buffer
+    frame_packets = []
     
     while True:
         try:
             frame = camera.get_latest_frame()
             if frame is None: continue
             
+            # 强制调整分辨率到目标尺寸
+            if frame.shape[1] != width or frame.shape[0] != height:
+                frame = cv2.resize(frame, (width, height))
+                print(f"[子进程] 调整帧大小: {frame.shape[1]}x{frame.shape[0]}")
+            
             # === 生产者：忙等待 (最低延迟) ===
             # 只有当数据被取走 (flag=0) 才写入
             while ready_flag.value == 1:
                 pass # 极速自旋，不 sleep，等待消费者取走数据
             
-            # 使用原始帧，不进行缩放，确保完整显示桌面
+            # 创建AV帧
             av_frame = av.VideoFrame.from_ndarray(frame, format='bgr24')
-            packets = stream.encode(av_frame)
+            # 转换为yuv420p
+            av_frame = av_frame.reformat(format='yuv420p')
             
+            # 每30帧强制发送一个关键帧，确保SPS/PPS稳定
+            frame_counter += 1
+            # 移除强制关键帧设置，因为我们已经在编码器选项中设置了g=1（全I帧）
+            # if frame_counter % 30 == 0:
+            #     av_frame.pict_type = 'I'
+            
+            # 编码
+            packets = codec.encode(av_frame)
+            
+            # 收集packet到frame_packets
             for packet in packets:
-                packet_data = bytes(packet)
-                data_len = len(packet_data)
+                frame_packets.append(packet)
+            
+            # 检查是否需要发送完整帧
+            # 条件：遇到关键帧 或 累积了足够多的packet
+            should_send = False
+            if len(frame_packets) > 0:
+                # 检查是否有关键帧
+                for packet in frame_packets:
+                    if packet.is_keyframe:
+                        should_send = True
+                        break
+                # 或者累积了太多packet（避免延迟）
+                if len(frame_packets) >= 5:
+                    should_send = True
+            
+            # 发送完整帧
+            if should_send and len(frame_packets) > 0:
+                # 组合所有packet成一个完整的数据块
+                frame_data = b''
+                for packet in frame_packets:
+                    frame_data += bytes(packet)
+                
+                data_len = len(frame_data)
                 
                 if data_len < SHM_BUFFER_SIZE:
                     shm_array[0:4] = struct.pack('I', data_len)
-                    shm_array[4 : 4+data_len] = packet_data
+                    shm_array[4 : 4+data_len] = frame_data
                     current_size.value = data_len
                     ready_flag.value = 1
-            
-            frame_count += 1
-            if time.time() - last_stats >= 1.0:
-                print(f"[子进程] FPS: {frame_count}")
-                frame_count = 0
-                last_stats = time.time()
+                    
+                    frame_count += 1
+                    if time.time() - last_stats >= 1.0:
+                        print(f"[子进程] FPS: {frame_count}")
+                        frame_count = 0
+                        last_stats = time.time()
+                
+                # 清空packet列表
+                frame_packets = []
             
         except Exception as e:
             print(f"[子进程循环错误] {e}")
@@ -254,12 +302,18 @@ class P2PControlledApp:
             fid = self.frame_id
             total_size = len(packet_data)
             
-            header = struct.pack('!III', FRAME_TYPE_HEADER, fid, total_size)
+            # 计算总分片数
+            total_chunks = (total_size + MTU_SIZE - 1) // MTU_SIZE
+            
+            # 发送header，包含总分片数
+            header = struct.pack('!IIIH', FRAME_TYPE_HEADER, fid, total_size, total_chunks)
             sock.sendto(header, self.controller_addr)
             
+            # 发送数据分片，每个分片包含当前分片索引和总分片数
             for i in range(0, total_size, MTU_SIZE):
                 chunk = packet_data[i : i + MTU_SIZE]
-                chunk_header = struct.pack('!IIIH', FRAME_TYPE_DATA, fid, total_size, i // MTU_SIZE)
+                chunk_idx = i // MTU_SIZE
+                chunk_header = struct.pack('!IIIHH', FRAME_TYPE_DATA, fid, total_size, chunk_idx, total_chunks)
                 sock.sendto(chunk_header + chunk, self.controller_addr)
         except BlockingIOError:
             pass # 缓冲区满，直接丢弃该分片 (网络拥塞时的最佳策略)
