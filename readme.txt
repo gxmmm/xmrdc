@@ -1,5 +1,6 @@
 #1.安装libjpeg-turbo-3.1.3-gcc-x64.exe  使用默认路径安装
 
+https://www.gyan.dev/ffmpeg/builds/
 
 #2.安装包依赖 pip install -r requirements.txt
 

@@ -21,6 +21,7 @@ VIDEO_BITRATE = 3000
 MAX_FPS = 60
 MTU_SIZE = 1400
 SHM_BUFFER_SIZE = 500 * 1024
+HEARTBEAT_INTERVAL = 200  # 心跳发送间隔(秒)，建议小于服务端超时时间
 # ===========================================
 
 capture_process = None
@@ -49,7 +50,7 @@ def capture_process_task(shm_array, current_size, ready_flag, bitrate, max_fps, 
 
     try:
         container = av.open('dummy.mpegts', 'w', format='mpegts')
-        stream = container.add_stream('h264_mf')
+        stream = container.add_stream('libx264')
         stream.width = width
         stream.height = height
         stream.pix_fmt = 'yuv420p'
@@ -59,7 +60,6 @@ def capture_process_task(shm_array, current_size, ready_flag, bitrate, max_fps, 
             'tune': 'zerolatency',
             'g': '15',
             'bf': '0',
-            'rc-lookahead': '0',
         }
         print(f"[子进程] Encoder OK")
     except Exception as e:
@@ -72,17 +72,22 @@ def capture_process_task(shm_array, current_size, ready_flag, bitrate, max_fps, 
     while True:
         try:
             frame = camera.get_latest_frame()
-            if frame is None: continue
+            if frame is None: 
+                time.sleep(0)
+                continue
             
             # === 生产者：忙等待 (最低延迟) ===
             # 只有当数据被取走 (flag=0) 才写入
             while ready_flag.value == 1:
                 time.sleep(0)
             
-            # 使用原始帧，不进行缩放，确保完整显示桌面
-            # av_frame = av.VideoFrame.from_ndarray(frame, format='bgr24')
-            av_frame = av.VideoFrame(width, height, 'bgr24')
-            av_frame.planes[0].update(frame)
+            # 创建AV帧
+            av_frame = av.VideoFrame.from_ndarray(frame, format='bgr24')
+            
+            # 如果分辨率不匹配，进行缩放
+            if av_frame.width != width or av_frame.height != height:
+                av_frame = av_frame.reformat(width=width, height=height)
+            #av_frame.planes[0].update(frame)
 
             packets = stream.encode(av_frame)
             
@@ -154,6 +159,10 @@ class P2PControlledApp:
             reg_msg = {'type': 'register', 'code': self.code, 'udp_port': LISTEN_PORT}
             tcp_sock.send(json.dumps(reg_msg).encode())
             self.update_status("已注册，等待连接...")
+            
+            # === 新增：启动心跳发送线程 ===
+            threading.Thread(target=self.heartbeat_sender, args=(tcp_sock,), daemon=True).start()
+            
             while self.running:
                 try:
                     tcp_sock.settimeout(5.0)
@@ -161,6 +170,17 @@ class P2PControlledApp:
                 except: continue
         except Exception as e:
             self.update_status(f"注册失败: {e}")
+
+    # === 新增：心跳发送函数 ===
+    def heartbeat_sender(self, sock):
+        while self.running:
+            try:
+                hb_msg = json.dumps({'type': 'heartbeat'})
+                sock.send(hb_msg.encode())
+            except Exception as e:
+                print(f"心跳发送失败: {e}")
+                break
+            time.sleep(HEARTBEAT_INTERVAL)
 
     def udp_listener_loop(self):
         self.udp_socket.settimeout(1.0)
