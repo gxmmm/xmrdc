@@ -346,7 +346,10 @@ class P2PControllerApp:
             else:
                 pyglet.clock.schedule_once(lambda dt: self.update_status("未找到"), 0)
         except Exception as e:
-            pyglet.clock.schedule_once(lambda dt: self.update_status(f"错误: {e}"), 0)
+            pyglet.clock.schedule_once(
+            lambda dt, err=str(e): self.update_status(f"错误: {err}"),
+            0
+            )
 
     def recv_loop(self):
         codec = None
