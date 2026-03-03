@@ -48,7 +48,7 @@ def capture_process_task(shm_array, current_size, ready_flag, bitrate, max_fps, 
 
     try:
         container = av.open('dummy.mpegts', 'w', format='mpegts')
-        stream = container.add_stream('h264', rate=max_fps)
+        stream = container.add_stream('h264_mf')
         stream.width = width
         stream.height = height
         stream.pix_fmt = 'yuv420p'
@@ -76,6 +76,7 @@ def capture_process_task(shm_array, current_size, ready_flag, bitrate, max_fps, 
             # === 生产者：忙等待 (最低延迟) ===
             # 只有当数据被取走 (flag=0) 才写入
             while ready_flag.value == 1:
+                time.sleep(0.0005)
                 pass # 极速自旋，不 sleep，等待消费者取走数据
             
             # 使用原始帧，不进行缩放，确保完整显示桌面
@@ -113,6 +114,7 @@ class P2PControlledApp:
         self.controller_addr = None
         self.last_heartbeat = 0
         self.frame_id = 0
+        self.mouse = pm.Controller()
         
         self.udp_socket = None
         self.shm_array = multiprocessing.RawArray(ctypes.c_ubyte, SHM_BUFFER_SIZE)
@@ -168,8 +170,8 @@ class P2PControlledApp:
                     try:
                         cmd = json.loads(data.decode())
                         if cmd['type'] == 'mouse':
-                            pm.Controller().position = (cmd['x'], cmd['y'])
-                            if cmd.get('click'): pm.Controller().click(pm.Button.left, 1)
+                            self.mouse.position = (cmd['x'], cmd['y'])
+                            if cmd.get('click'): self.mouse.click(pm.Button.left, 1)
                         elif cmd['type'] == 'resolution':
                                 # 接收分辨率设置
                                 new_width = cmd['width']

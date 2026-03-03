@@ -7,3 +7,4 @@ dxcam #windows版本需要
 pylibfec #windows fast 版本需要
 av #windows fast 版本需要
 psutil #windows fast 版本需要
+pyglet 
