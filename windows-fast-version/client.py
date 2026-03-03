@@ -11,6 +11,8 @@ import numpy as np
 import pyglet
 from pyglet import gl
 from pyglet.window import key, mouse, FPSDisplay
+import ctypes
+from ctypes import wintypes
 
 # Windows特定优化
 if platform.system() == 'Windows':
@@ -83,6 +85,8 @@ class P2PControllerApp:
         # === 桌面显示组件 ===
         self.texture = None
         self.sprite = None
+        # === 鼠标显示 ===
+        self.user32 = ctypes.windll.user32
         
         # === 分辨率预设与状态 ===
         self.resolution_presets = ['480p', '720p', '1080p']
@@ -110,9 +114,46 @@ class P2PControllerApp:
         pyglet.clock.schedule_interval(self.update_frame, 1/60.0)
         pyglet.clock.schedule_interval(self.update_stats, 2.0)
 
-    # ==================== GUI 事件处理 ====================
-    
-    # --- 键盘事件 ---
+
+        @self.window.event
+        def on_activate():
+            if self.connected:
+                #self.clip_cursor_to_sprite()
+                pass
+
+        @self.window.event
+        def on_deactivate():
+            self.release_cursor()
+
+    def release_cursor(self):
+            self.user32.ClipCursor(None)
+
+    def clip_cursor_to_sprite(self):
+            if not self.sprite:
+                return
+
+            win_w, win_h = self.window.width, self.window.height
+            tex_w, tex_h = self.texture.width, self.texture.height
+
+            ratio = min(win_w / tex_w, win_h / tex_h)
+
+            display_w = tex_w * ratio
+            display_h = tex_h * ratio
+
+            offset_x = (win_w - display_w) / 2
+            offset_y = (win_h - display_h) / 2
+
+            # 转换为屏幕坐标
+            rect = wintypes.RECT()
+            hwnd = self.window._hwnd  # pyglet Windows 句柄
+            self.user32.GetWindowRect(hwnd, ctypes.byref(rect))
+
+            rect.left += int(offset_x)
+            rect.top += int(offset_y)
+            rect.right = rect.left + int(display_w)
+            rect.bottom = rect.top + int(display_h)
+
+            self.user32.ClipCursor(ctypes.byref(rect)) 
     
     def on_key_press(self, symbol, modifiers):
         # 1. 登录界面
@@ -443,7 +484,7 @@ class P2PControllerApp:
         w, h = self.resolution_map[res_key]
         self.window.set_size(w, h)
         self.window.set_caption(f"Remote Desktop - {res_key} | F11:切换分辨率 F12:全屏")
-        self.fps_display = FPSDisplay(self.window)
+        #self.fps_display = FPSDisplay(self.window)  #FPS显示
 
     def change_resolution(self, res_key):
         w, h = self.resolution_map[res_key]
@@ -458,7 +499,7 @@ class P2PControllerApp:
         if not self.connected: return
         if len(self.perf_stats['decode']) > 0:
             avg_dec = sum(self.perf_stats['decode']) / len(self.perf_stats['decode']) * 1000
-            print(f"[性能] Decode: {avg_dec:.1f}ms")
+            #print(f"[性能] Decode: {avg_dec:.1f}ms")
         self.perf_stats = {'decode': [], 'render': []}
 
     def update_status(self, text):

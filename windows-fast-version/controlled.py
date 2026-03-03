@@ -1,3 +1,4 @@
+import gc
 import socket
 import threading
 import json
@@ -76,11 +77,13 @@ def capture_process_task(shm_array, current_size, ready_flag, bitrate, max_fps, 
             # === 生产者：忙等待 (最低延迟) ===
             # 只有当数据被取走 (flag=0) 才写入
             while ready_flag.value == 1:
-                time.sleep(0.0005)
-                pass # 极速自旋，不 sleep，等待消费者取走数据
+                time.sleep(0)
             
             # 使用原始帧，不进行缩放，确保完整显示桌面
-            av_frame = av.VideoFrame.from_ndarray(frame, format='bgr24')
+            # av_frame = av.VideoFrame.from_ndarray(frame, format='bgr24')
+            av_frame = av.VideoFrame(width, height, 'bgr24')
+            av_frame.planes[0].update(frame)
+
             packets = stream.encode(av_frame)
             
             for packet in packets:
@@ -95,7 +98,7 @@ def capture_process_task(shm_array, current_size, ready_flag, bitrate, max_fps, 
             
             frame_count += 1
             if time.time() - last_stats >= 1.0:
-                print(f"[子进程] FPS: {frame_count}")
+                #print(f"[子进程] FPS: {frame_count}")
                 frame_count = 0
                 last_stats = time.time()
             
@@ -104,6 +107,10 @@ def capture_process_task(shm_array, current_size, ready_flag, bitrate, max_fps, 
 
 class P2PControlledApp:
     def __init__(self):
+        #禁用gc
+        import gc
+        gc.disable()
+
         self.root = tk.Tk()
         self.root.title("远程桌面-极速版")
         self.root.geometry("400x250")
@@ -118,8 +125,8 @@ class P2PControlledApp:
         
         self.udp_socket = None
         self.shm_array = multiprocessing.RawArray(ctypes.c_ubyte, SHM_BUFFER_SIZE)
-        self.shared_size = multiprocessing.Value(ctypes.c_int, 0)
-        self.ready_flag = multiprocessing.Value(ctypes.c_int, 0)
+        self.shared_size = multiprocessing.RawValue(ctypes.c_int, 0)
+        self.ready_flag = multiprocessing.RawValue(ctypes.c_int, 0)
         
         # GUI
         tk.Label(self.root, text="口令:").pack(pady=5)
@@ -244,7 +251,7 @@ class P2PControlledApp:
                         self.update_stats(frame_count)
                         frame_count = 0; last_stats = time.time()
                 else:
-                    pass # 不 sleep，死循环检查 (CPU占用可控，因为有 flag 互斥)
+                    time.sleep(0)
                     
             except Exception as e:
                 print(f"[发送错误] {e}")
@@ -259,10 +266,16 @@ class P2PControlledApp:
             header = struct.pack('!III', FRAME_TYPE_HEADER, fid, total_size)
             sock.sendto(header, self.controller_addr)
             
-            for i in range(0, total_size, MTU_SIZE):
-                chunk = packet_data[i : i + MTU_SIZE]
+            # for i in range(0, total_size, MTU_SIZE):
+            #     chunk = packet_data[i : i + MTU_SIZE]
+            #     chunk_header = struct.pack('!IIIH', FRAME_TYPE_DATA, fid, total_size, i // MTU_SIZE)
+            #     sock.sendto(chunk_header + chunk, self.controller_addr)
+            i = 0
+            while i < total_size:
+                chunk = packet_data[i:i+MTU_SIZE]
                 chunk_header = struct.pack('!IIIH', FRAME_TYPE_DATA, fid, total_size, i // MTU_SIZE)
                 sock.sendto(chunk_header + chunk, self.controller_addr)
+                i += MTU_SIZE    
         except BlockingIOError:
             pass # 缓冲区满，直接丢弃该分片 (网络拥塞时的最佳策略)
         except: pass
