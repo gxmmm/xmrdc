@@ -31,8 +31,8 @@ if platform.system() == 'Windows':
 # 配置常量
 SERVER_IP = 'frp-hat.com'
 SERVER_PORT = 43972
+
 MTU_SIZE = 1400
-LOCAL_UDP_PORT = 20000
 
 FRAME_TYPE_HEADER = 0x4A4B4C4D
 FRAME_TYPE_DATA   = 0x4A4B4C4E
@@ -79,9 +79,8 @@ class P2PControllerApp:
         self.btn_connect_label = pyglet.text.Label("连接", font_size=14, color=(255, 255, 255, 255),
                                                    x=250, y=170, anchor_x='center', batch=self.batch, group=self.login_group)
         
-        self.status_label = pyglet.text.Label(f"端口 {LOCAL_UDP_PORT}", font_size=12, color=(128, 128, 128, 255),
+        self.status_label = pyglet.text.Label(f"状态 未连接", font_size=12, color=(128, 128, 128, 255),
                                               x=250, y=50, anchor_x='center', batch=self.batch, group=self.login_group)
-
         # === 桌面显示组件 ===
         self.texture = None
         self.sprite = None
@@ -118,7 +117,7 @@ class P2PControllerApp:
         @self.window.event
         def on_activate():
             if self.connected:
-                #self.clip_cursor_to_sprite()
+                self.clip_cursor_to_sprite()
                 pass
 
         @self.window.event
@@ -333,15 +332,15 @@ class P2PControllerApp:
                 self.udp_socket.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 8*1024*1024)
                 self.udp_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
                 
-                try: self.udp_socket.bind(('0.0.0.0', LOCAL_UDP_PORT))
-                except OSError: self.udp_socket.bind(('0.0.0.0', 0))
+                #绑定随机端口
+                self.udp_socket.bind(('0.0.0.0', 0))
                 
                 threading.Thread(target=self.recv_loop, daemon=True).start()
                 
                 punch_msg = json.dumps({'type': 'punch'}).encode()
-                for _ in range(100):
+                for _ in range(50):
                     self.udp_socket.sendto(punch_msg, self.target_addr)
-                    time.sleep(0.01)
+                    time.sleep(0.02)
                     if self.connected: break
             else:
                 pyglet.clock.schedule_once(lambda dt: self.update_status("未找到"), 0)

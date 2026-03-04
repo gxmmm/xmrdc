@@ -12,10 +12,9 @@ import ctypes
 import numpy as np
 import av
 
-# ================= 配置区域 =================
+# ================= 中继信令服务配置区域 =================
 SERVER_IP = 'frp-hat.com'
 SERVER_PORT = 43972
-LISTEN_PORT = 9050
 
 VIDEO_BITRATE = 3000
 MAX_FPS = 60
@@ -150,13 +149,14 @@ class P2PControlledApp:
         self.udp_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.udp_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         self.udp_socket.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 8*1024*1024) 
-        self.udp_socket.bind(('0.0.0.0', LISTEN_PORT))
+        self.udp_socket.bind(('0.0.0.0', 0))
+        local_port = self.udp_socket.getsockname()[1]
         threading.Thread(target=self.udp_listener_loop, daemon=True).start()
         
         try:
             tcp_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             tcp_sock.connect((SERVER_IP, SERVER_PORT))
-            reg_msg = {'type': 'register', 'code': self.code, 'udp_port': LISTEN_PORT}
+            reg_msg = {'type': 'register', 'code': self.code, 'udp_port': local_port}
             tcp_sock.send(json.dumps(reg_msg).encode())
             self.update_status("已注册，等待连接...")
             

@@ -12,5 +12,5 @@ https://www.gyan.dev/ffmpeg/builds/
 #4.控制端 重复1，2步骤 包路径下执行
     python client.py
 
-
+netsh advfirewall firewall add rule name="UDP9050" dir=in action=allow protocol=udp localport=9050
 
