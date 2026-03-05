@@ -6,12 +6,13 @@ import struct
 import av
 import platform
 import os
-import numpy as np
+import ctypes
+from ctypes import wintypes
+
 import pyglet
 from pyglet import gl
 from pyglet.window import key, mouse
-import ctypes
-from ctypes import wintypes
+from pyglet.graphics import shader
 
 # Windows特定优化
 if platform.system() == 'Windows':
@@ -37,15 +38,15 @@ FRAME_TYPE_HEADER = 0x4A4B4C4D
 FRAME_TYPE_DATA   = 0x4A4B4C4E
 I_FRAME_THRESHOLD = 30 * 1024
 
-# ================= UI 样式配置 (与被控端一致的深色风格) =================
-COLOR_BG = (25, 25, 25, 255)             # 深灰背景 #191919
-COLOR_PANEL = (45, 45, 45, 255)          # 输入框/面板背景 #2D2D2D
-COLOR_PRIMARY = (76, 175, 80, 255)       # 绿色按钮 (连接) #4CAF50
-COLOR_TEXT_WHITE = (255, 255, 255, 255)  # 标题文字
-COLOR_TEXT_GRAY = (180, 180, 180, 255)   # 提示文字
-COLOR_TEXT_HINT = (100, 100, 100, 255)   # 暗淡提示
-COLOR_ACCENT = (0, 120, 215, 255)        # 激活状态蓝色边框 #0078D7
-COLOR_BORDER_DEFAULT = (60, 60, 60, 255) # 默认边框颜色
+# ================= UI 样式配置 =================
+COLOR_BG = (25, 25, 25, 255)
+COLOR_PANEL = (45, 45, 45, 255)
+COLOR_PRIMARY = (76, 175, 80, 255)
+COLOR_TEXT_WHITE = (255, 255, 255, 255)
+COLOR_TEXT_GRAY = (180, 180, 180, 255)
+COLOR_TEXT_HINT = (100, 100, 100, 255)
+COLOR_ACCENT = (0, 120, 215, 255)
+COLOR_BORDER_DEFAULT = (60, 60, 60, 255)
 # =====================================================================
 
 class P2PControllerApp:
@@ -72,13 +73,20 @@ class P2PControllerApp:
         self.batch = pyglet.graphics.Batch()
         
         # === 输入状态 ===
-        self.input_active = False  # 输入框是否激活
+        self.input_active = False
+        
+        # === GPU 资源 ===
+        self.y_tex = None
+        self.u_tex = None
+        self.v_tex = None
+        self.shader_program = None
+        self.quad_vlist = None
+        
+        # 初始化 Shader
+        self.init_shader()
         
         self.init_login_ui()
         
-        # === 桌面显示组件 ===
-        self.texture = None
-        self.sprite = None
         self.user32 = ctypes.windll.user32
         
         # === 分辨率预设与状态 ===
@@ -87,7 +95,6 @@ class P2PControllerApp:
         self.current_res_idx = 1
         
         self.pre_fullscreen_size = (1280, 720)
-        self.perf_stats = {'decode': [], 'render': []}
         self.fps_display = None
         
         # === 事件绑定 ===
@@ -103,7 +110,7 @@ class P2PControllerApp:
         
         pyglet.clock.schedule_interval(self.update_frame, 1/60.0)
         pyglet.clock.schedule_interval(self.update_stats, 2.0)
-        pyglet.clock.schedule_interval(self.blink_cursor, 0.5) # 光标闪烁定时器
+        pyglet.clock.schedule_interval(self.blink_cursor, 0.5)
 
         @self.window.event
         def on_activate():
@@ -114,55 +121,86 @@ class P2PControllerApp:
         def on_deactivate():
             self.release_cursor()
 
+    def init_shader(self):
+        """初始化 YUV 转 RGB 的 Shader 程序"""
+        vertex_shader_source = """
+        #version 150 core
+        in vec2 position;
+        in vec2 texcoord;
+        out vec2 v_texcoord;
+        void main()
+        {
+            gl_Position = vec4(position, 0.0, 1.0);
+            v_texcoord = texcoord;
+        }
+        """
+
+        fragment_shader_source = """
+        #version 150 core
+        uniform sampler2D tex_y;
+        uniform sampler2D tex_u;
+        uniform sampler2D tex_v;
+        in vec2 v_texcoord;
+        out vec4 out_color;
+        void main()
+        {
+            float y = texture(tex_y, v_texcoord).r;
+            float u = texture(tex_u, v_texcoord).r - 0.5;
+            float v = texture(tex_v, v_texcoord).r - 0.5;
+            float r = y + 1.402 * v;
+            float g = y - 0.344 * u - 0.714 * v;
+            float b = y + 1.772 * u;
+            out_color = vec4(r, g, b, 1.0);
+        }
+        """
+
+        try:
+            vs = shader.Shader(vertex_shader_source, 'vertex')
+            fs = shader.Shader(fragment_shader_source, 'fragment')
+            self.shader_program = shader.ShaderProgram(vs, fs)
+            
+            # 【修复1】某些显卡黑屏问题：设置像素对齐方式为 1
+            # 防止 YUV stride 不对齐导致的纹理错位
+            gl.glPixelStorei(gl.GL_UNPACK_ALIGNMENT, 1)
+        except Exception as e:
+            print(f"Shader 初始化失败: {e}")
+            raise
+
     def init_login_ui(self):
         """初始化深色风格登录界面"""
         win_w, win_h = self.window.width, self.window.height
         
-        # 1. 标题 "远程桌面"
         self.label_title = pyglet.text.Label("远端口令", font_name='Microsoft YaHei', font_size=24, 
                                              color=COLOR_TEXT_WHITE,
                                              x=win_w//2, y=win_h - 80, 
                                              anchor_x='center', batch=self.batch)
 
-        # 2. 远端连接口令 (提示文字)
-        # self.label_code_title = pyglet.text.Label("远端连接口令", font_name='Microsoft YaHei', font_size=13, 
-        #                                      color=COLOR_TEXT_GRAY,
-        #                                      x=win_w//2, y=win_h - 140, 
-        #                                      anchor_x='center', batch=self.batch)
-
-        # 3. 输入框背景
         self.input_width = 220
         self.input_height = 50
         self.input_x = (win_w - self.input_width) // 2
         self.input_y = win_h - 210
         
-        # 背景
         self.input_bg = pyglet.shapes.Rectangle(self.input_x, self.input_y, self.input_width, self.input_height, 
                                                 color=COLOR_PANEL[:3], batch=self.batch)
         
-        # 边框 - 默认状态
         self.input_border = pyglet.shapes.BorderedRectangle(
             self.input_x, self.input_y, self.input_width, self.input_height, 
             border=2, color=COLOR_PANEL[:3], border_color=COLOR_BORDER_DEFAULT[:3], batch=self.batch)
 
-        # 4. 输入文字
         self.text_input = ""
         self.label_input = pyglet.text.Label("", font_name='Consolas', font_size=28, 
                                              color=COLOR_TEXT_WHITE,
                                              x=win_w//2, y=self.input_y + self.input_height//2, 
                                              anchor_x='center', anchor_y='center', batch=self.batch)
         
-        # 占位符
         self.label_placeholder = pyglet.text.Label("请输入口令", font_name='Microsoft YaHei', font_size=16, 
                                                    color=COLOR_TEXT_HINT,
                                                    x=win_w//2, y=self.input_y + self.input_height//2, 
                                                    anchor_x='center', anchor_y='center', batch=self.batch)
 
-        # 光标
         self.cursor = pyglet.shapes.Rectangle(0, 0, 2, 30, color=COLOR_TEXT_WHITE, batch=self.batch)
         self.cursor.visible = False
 
-        # 5. 连接按钮 (绿色)
         btn_w = 140
         btn_h = 42
         btn_x = (win_w - btn_w) // 2
@@ -175,7 +213,6 @@ class P2PControllerApp:
                                                    x=btn_x + btn_w//2, y=btn_y + btn_h//2, 
                                                    anchor_x='center', anchor_y='center', batch=self.batch)
 
-        # 6. 底部信息栏
         self.status_label = pyglet.text.Label("等待连接...", font_name='Microsoft YaHei', font_size=12, 
                                               color=(100, 200, 100, 255), 
                                               x=win_w//2, y=btn_y - 50, 
@@ -188,26 +225,20 @@ class P2PControllerApp:
                                           anchor_x='center', batch=self.batch)
 
     def blink_cursor(self, dt):
-        """光标闪烁逻辑"""
         if self.input_active and not self.connected:
             self.cursor.visible = not self.cursor.visible
         else:
             self.cursor.visible = False
 
     def update_input_style(self):
-        """更新输入框样式"""
         if self.input_active:
-            # 激活状态：蓝色边框
             self.input_border.border_color = COLOR_ACCENT[:3]
-            self.cursor.visible = True # 立即显示光标
+            self.cursor.visible = True
         else:
-            # 非激活状态：灰色边框
             self.input_border.border_color = COLOR_BORDER_DEFAULT[:3]
             self.cursor.visible = False
         
-        # 更新光标位置
         text_width = self.label_input.content_width
-        # 计算光标X坐标：文本中心 + 文本宽度/2 + 2px间隙
         cursor_x = self.window.width//2 + text_width//2 + 4
         cursor_y = self.input_y + (self.input_height - 30) // 2
         self.cursor.position = (cursor_x, cursor_y)
@@ -216,9 +247,9 @@ class P2PControllerApp:
         self.user32.ClipCursor(None)
 
     def clip_cursor_to_sprite(self):
-        if not self.sprite: return
+        if not self.y_tex: return
         win_w, win_h = self.window.width, self.window.height
-        tex_w, tex_h = self.texture.width, self.texture.height
+        tex_w, tex_h = self.y_tex.width, self.y_tex.height
         ratio = min(win_w / tex_w, win_h / tex_h)
         display_w = tex_w * ratio
         display_h = tex_h * ratio
@@ -235,7 +266,6 @@ class P2PControllerApp:
     
     def on_key_press(self, symbol, modifiers):
         if not self.connected:
-            # 如果按键按下，自动激活输入框
             if not self.input_active:
                 self.input_active = True
                 self.update_input_style()
@@ -245,9 +275,7 @@ class P2PControllerApp:
             elif symbol == key.ENTER:
                 self.start_p2p()
             elif symbol == key.TAB:
-                # 可以在此处理Tab切换焦点，暂时忽略
                 pass
-            # 限制只能输入数字，且长度不超过6位
             elif len(self.text_input) < 6:
                 val = None
                 if key._0 <= symbol <= key._9:
@@ -258,10 +286,9 @@ class P2PControllerApp:
                 if val is not None:
                     self.text_input += str(val)
             
-            # 更新UI
             self.label_input.text = self.text_input
             self.label_placeholder.visible = (len(self.text_input) == 0)
-            self.update_input_style() # 更新光标位置
+            self.update_input_style()
             return
 
         if symbol == key.F11:
@@ -294,8 +321,8 @@ class P2PControllerApp:
         except: pass
 
     def on_mouse_motion(self, x, y, dx, dy):
-        if not self.connected or not self.target_addr or not self.texture: return
-        vid_w, vid_h = self.texture.width, self.texture.height
+        if not self.connected or not self.target_addr or not self.y_tex: return
+        vid_w, vid_h = self.y_tex.width, self.y_tex.height
         win_w, win_h = self.window.width, self.window.height
         ratio = min(win_w / vid_w, win_h / vid_h)
         display_w = vid_w * ratio
@@ -315,7 +342,6 @@ class P2PControllerApp:
 
     def on_mouse_press(self, x, y, button, modifiers):
         if not self.connected:
-            # 检测是否点击了输入框
             if self.input_x <= x <= self.input_x + self.input_width and \
                self.input_y <= y <= self.input_y + self.input_height:
                 self.input_active = True
@@ -324,15 +350,14 @@ class P2PControllerApp:
             
             self.update_input_style()
 
-            # 检测按钮点击
             if button == mouse.LEFT:
                 if self.btn_connect_rect.x <= x <= self.btn_connect_rect.x + self.btn_connect_rect.width and \
                    self.btn_connect_rect.y <= y <= self.btn_connect_rect.y + self.btn_connect_rect.height:
                     self.start_p2p()
             return
 
-        if self.target_addr and self.texture:
-            vid_w, vid_h = self.texture.width, self.texture.height
+        if self.target_addr and self.y_tex:
+            vid_w, vid_h = self.y_tex.width, self.y_tex.height
             win_w, win_h = self.window.width, self.window.height
             ratio = min(win_w / vid_w, win_h / vid_h)
             display_w = vid_w * ratio
@@ -351,8 +376,8 @@ class P2PControllerApp:
 
     def on_mouse_release(self, x, y, button, modifiers):
         if not self.connected: return
-        if self.target_addr and self.texture:
-            vid_w, vid_h = self.texture.width, self.texture.height
+        if self.target_addr and self.y_tex:
+            vid_w, vid_h = self.y_tex.width, self.y_tex.height
             win_w, win_h = self.window.width, self.window.height
             ratio = min(win_w / vid_w, win_h / vid_h)
             display_w = vid_w * ratio
@@ -379,17 +404,50 @@ class P2PControllerApp:
             self.window.set_size(w, h)
 
     def on_draw(self):
-        # 设置深色背景
         pyglet.gl.glClearColor(*[c/255.0 for c in COLOR_BG])
         self.window.clear()
         
-        if self.connected:
-            if self.sprite:
-                self.sprite.draw()
+        if self.connected and self.y_tex:
+            self.shader_program.use()
+            
+            gl.glActiveTexture(gl.GL_TEXTURE0)
+            gl.glBindTexture(gl.GL_TEXTURE_2D, self.y_tex.id)
+            self.shader_program['tex_y'] = 0
+            
+            gl.glActiveTexture(gl.GL_TEXTURE1)
+            gl.glBindTexture(gl.GL_TEXTURE_2D, self.u_tex.id)
+            self.shader_program['tex_u'] = 1
+            
+            gl.glActiveTexture(gl.GL_TEXTURE2)
+            gl.glBindTexture(gl.GL_TEXTURE_2D, self.v_tex.id)
+            self.shader_program['tex_v'] = 2
+            
+            self.update_quad_vertices()
+            self.quad_vlist.draw(gl.GL_TRIANGLE_FAN)
+            
+            self.shader_program.stop()
+            
             if self.fps_display:
                 self.fps_display.draw()
         else:
             self.batch.draw()
+
+    def update_quad_vertices(self):
+        if not self.y_tex: return
+        
+        win_w, win_h = self.window.width, self.window.height
+        vid_w, vid_h = self.y_tex.width, self.y_tex.height
+        
+        ratio = min(win_w / vid_w, win_h / vid_h)
+        display_w = vid_w * ratio
+        display_h = vid_h * ratio
+        
+        x1 = - (display_w / win_w)
+        x2 =   (display_w / win_w)
+        y1 = - (display_h / win_h)
+        y2 =   (display_h / win_h)
+        
+        self.quad_vlist.position[:] = [x1, y1, x2, y1, x2, y2, x1, y2]
 
     # ==================== 连接逻辑 ====================
 
@@ -398,7 +456,6 @@ class P2PControllerApp:
         code = self.text_input
         self.status_label.text = "正在连接..."
         self.btn_connect_label.text = "连接中..."
-        # 直接使用硬编码的服务器IP
         threading.Thread(target=self.p2p_worker, args=(code, TARGET_SERVER_IP), daemon=True).start()
 
     def get_local_ip(self):
@@ -413,7 +470,6 @@ class P2PControllerApp:
 
     def p2p_worker(self, code, target_ip):
         try:
-            # 1. 准备 UDP
             self.udp_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
             self.udp_socket.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 8*1024*1024)
             self.udp_socket.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 8*1024*1024)
@@ -423,7 +479,6 @@ class P2PControllerApp:
             local_port = self.udp_socket.getsockname()[1]
             local_ip = self.get_local_ip()
 
-            # 2. TCP 握手
             tcp_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             tcp_sock.settimeout(5.0)
             tcp_sock.connect((target_ip, TCP_PORT))
@@ -442,7 +497,6 @@ class P2PControllerApp:
             tcp_sock.close()
             
             if resp.get('status') == 'ok':
-                # 3. 解析双地址
                 peer_public_ip = target_ip
                 peer_public_port = resp['peer_public_port']
                 peer_local_ip = resp.get('peer_local_ip')
@@ -450,14 +504,11 @@ class P2PControllerApp:
                 
                 pyglet.clock.schedule_once(lambda dt: self.update_status("并发打洞中..."), 0)
                 
-                # 4. 启动接收线程
                 threading.Thread(target=self.recv_loop, daemon=True).start()
                 
-                # 5. 并发打洞 - 公网
                 threading.Thread(target=self.punch_thread, 
                                  args=((peer_public_ip, peer_public_port),), daemon=True).start()
                 
-                # 5. 并发打洞 - 局域网 (如果IP不同)
                 if peer_local_ip and peer_local_ip != peer_public_ip:
                     threading.Thread(target=self.punch_thread, 
                                  args=((peer_local_ip, peer_local_port),), daemon=True).start()
@@ -472,7 +523,6 @@ class P2PControllerApp:
             pyglet.clock.schedule_once(lambda dt, err=str(e): self.update_status(f"错误: {err}"), 0)
 
     def punch_thread(self, addr):
-        """疯狂发送打洞包"""
         msg = b"PUNCH_SYNC"
         for _ in range(50):
             if self.connected: break
@@ -490,10 +540,9 @@ class P2PControllerApp:
             try:
                 data, addr = self.udp_socket.recvfrom(65535)
                 
-                # === 自动锁定通道 ===
                 if not self.connected:
                     self.connected = True
-                    self.target_addr = addr # 锁定最先响应的地址
+                    self.target_addr = addr
                     pyglet.clock.schedule_once(lambda dt: self.switch_to_desktop_ui(), 0)
                     threading.Thread(target=self.heartbeat_daemon, daemon=True).start()
                     print(f"[连接成功] 最佳通道: {addr}")
@@ -542,19 +591,22 @@ class P2PControllerApp:
                                 if codec is None:
                                     codec = av.CodecContext.create('h264', 'r')
                                     codec.thread_type = 'auto'
+                                    codec.options = {
+                                        "threads": "auto",
+                                        "flags2": "fast"
+                                    }
                                 
                                 try:
-                                    t_start = time.time()
                                     packet = av.packet.Packet(bytes(obj['data']))
                                     frames = codec.decode(packet)
                                     
                                     if frames:
-                                            frame = frames[0].reformat(format='rgb24')
-
-                                            with self.image_lock:
-                                                self.latest_frame = frame
+                                        frame = frames[0]
+                                        if frame.format.name != 'yuv420p':
+                                            frame = frame.reformat(format='yuv420p')
                                         
-                                        #self.perf_stats['decode'].append(time.time() - t_start)
+                                        with self.image_lock:
+                                            self.latest_frame = frame
                                     
                                     del self.frame_buffers[fid]
                                 except Exception:
@@ -574,72 +626,67 @@ class P2PControllerApp:
         if not self.connected: return
         
         with self.image_lock:
-            if self.latest_frame is not None:
-                frame_data = self.latest_frame
-                self.latest_frame = None
-            else:
+            if self.latest_frame is None:
                 return
+            frame = self.latest_frame
+            self.latest_frame = None
         
-        frame = frame_data
-
+        y_plane = frame.planes[0]
+        u_plane = frame.planes[1]
+        v_plane = frame.planes[2]
+        
         w = frame.width
         h = frame.height
-
-        plane = frame.planes[0]
-
-        buf = ctypes.c_void_p(plane.buffer_ptr)
-
-        if self.texture is None or self.texture.width != w or self.texture.height != h:
-
-            self.texture = pyglet.image.Texture.create(w, h)
-
-            gl.glBindTexture(gl.GL_TEXTURE_2D, self.texture.id)
-
-            gl.glTexImage2D(
-                gl.GL_TEXTURE_2D,
-                0,
-                gl.GL_RGB,
-                w,
-                h,
-                0,
-                gl.GL_RGB,
-                gl.GL_UNSIGNED_BYTE,
-                buf
-            )
-
-            self.sprite = pyglet.sprite.Sprite(self.texture)
-
-        else:
-
-            gl.glBindTexture(gl.GL_TEXTURE_2D, self.texture.id)
-
-            gl.glTexSubImage2D(
-                gl.GL_TEXTURE_2D,
-                0,
-                0,
-                0,
-                w,
-                h,
-                gl.GL_RGB,
-                gl.GL_UNSIGNED_BYTE,
-                buf
-            )
+        
+        y_ptr = ctypes.c_void_p(y_plane.buffer_ptr)
+        u_ptr = ctypes.c_void_p(u_plane.buffer_ptr)
+        v_ptr = ctypes.c_void_p(v_plane.buffer_ptr)
+        
+        # 如果纹理不存在或尺寸变化，创建新纹理
+        if self.y_tex is None or self.y_tex.width != w or self.y_tex.height != h:
+            self.y_tex = pyglet.image.Texture.create(w, h, internalformat=gl.GL_RED)
+            self.u_tex = pyglet.image.Texture.create(w//2, h//2, internalformat=gl.GL_RED)
+            self.v_tex = pyglet.image.Texture.create(w//2, h//2, internalformat=gl.GL_RED)
             
-        #self.perf_stats['render'].append(time.time())
-        self.resize_sprite()
+            # 【修复2】设置纹理过滤模式为 GL_NEAREST
+            # 防止远程桌面文字模糊，提高清晰度
+            for tex in (self.y_tex, self.u_tex, self.v_tex):
+                gl.glBindTexture(gl.GL_TEXTURE_2D, tex.id)
+                gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_MIN_FILTER, gl.GL_NEAREST)
+                gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_MAG_FILTER, gl.GL_NEAREST)
+            
+            if self.quad_vlist is None:
+                # 【修复画面倒置】
+                # OpenGL 纹理原点在左下角 (0,0)，PyAV/图像数据原点在左上角。
+                # 通过翻转纹理坐标 Y 轴 (1-y) 来修正倒置。
+                # 原始 Y: 0, 0, 1, 1 -> 翻转后: 1, 1, 0, 0
+                # 顺序：左下(0,1), 右下(1,1), 右上(1,0), 左上(0,0)
+                self.quad_vlist = self.shader_program.vertex_list(
+                    4, gl.GL_TRIANGLE_FAN,
+                    position=('f', [-1.0, -1.0, 1.0, -1.0, 1.0, 1.0, -1.0, 1.0]),
+                    texcoord=('f', [0.0, 1.0, 1.0, 1.0, 1.0, 0.0, 0.0, 0.0]) 
+                )
 
-    def resize_sprite(self):
-        if not self.sprite or not self.texture: return
-        win_w, win_h = self.window.width, self.window.height
-        tex_w, tex_h = self.texture.width, self.texture.height
+        # 【修复3】使用 UNPACK_ROW_LENGTH 优化 CPU 占用
+        # 直接告诉 GPU 数据的步长，避免 CPU 预处理数据拷贝
+
+        # 上传 Y Plane
+        gl.glBindTexture(gl.GL_TEXTURE_2D, self.y_tex.id)
+        gl.glPixelStorei(gl.GL_UNPACK_ROW_LENGTH, y_plane.line_size)
+        gl.glTexSubImage2D(gl.GL_TEXTURE_2D, 0, 0, 0, w, h, gl.GL_RED, gl.GL_UNSIGNED_BYTE, y_ptr)
         
-        ratio = min(win_w / tex_w, win_h / tex_h)
-        self.sprite.scale = ratio
-        self.sprite.scale_y = -ratio
+        # 上传 U Plane
+        gl.glBindTexture(gl.GL_TEXTURE_2D, self.u_tex.id)
+        gl.glPixelStorei(gl.GL_UNPACK_ROW_LENGTH, u_plane.line_size)
+        gl.glTexSubImage2D(gl.GL_TEXTURE_2D, 0, 0, 0, w//2, h//2, gl.GL_RED, gl.GL_UNSIGNED_BYTE, u_ptr)
+
+        # 上传 V Plane
+        gl.glBindTexture(gl.GL_TEXTURE_2D, self.v_tex.id)
+        gl.glPixelStorei(gl.GL_UNPACK_ROW_LENGTH, v_plane.line_size)
+        gl.glTexSubImage2D(gl.GL_TEXTURE_2D, 0, 0, 0, w//2, h//2, gl.GL_RED, gl.GL_UNSIGNED_BYTE, v_ptr)
         
-        pos_x = (win_w - tex_w * ratio) / 2
-        pos_y = (win_h + tex_h * ratio) / 2
-        self.sprite.position = (pos_x, pos_y, 0)
+        # 恢复状态，避免影响其他绘制
+        gl.glPixelStorei(gl.GL_UNPACK_ROW_LENGTH, 0)
 
     def switch_to_desktop_ui(self):
         res_key = self.resolution_presets[self.current_res_idx]
@@ -660,7 +707,6 @@ class P2PControllerApp:
 
     def update_stats(self, dt):
         if not self.connected: return
-        #self.perf_stats = {'decode': [], 'render': []}
 
     def update_status(self, text):
         self.status_label.text = text

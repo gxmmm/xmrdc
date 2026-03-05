@@ -53,27 +53,26 @@ def capture_process_task(shm_array, current_size, ready_flag, bitrate, max_fps, 
         stream.width = width
         stream.height = height
         stream.pix_fmt = 'yuv420p'
-        stream.bit_rate = bitrate * 1000
         stream.options = {
             'preset': 'ultrafast',
             'tune': 'zerolatency',
-            'crf': str(CRF_VALUE),
-            'g': '30',
+            'crf': '24',
             'bf': '0',
+            'refs': '1',
             'rc-lookahead': '0',
+            'g': '60',
+            'keyint_min': '60',
             'scenecut': '0',
-            'maxrate': str(bitrate * 1000),
-            'bufsize': str(bitrate * 2000),
+            'aq-mode': '1',
+            'aq-strength': '1.0'
         }
-        print(f"[子进程] Encoder OK - CRF:{CRF_VALUE}, 初始码率:{bitrate}kbps")
+        print(f"[子进程] Encoder OK - CRF:24")
     except Exception as e:
         print(f"[子进程错误] Encoder: {e}")
         return
 
     last_stats = time.time()
     frame_count = 0
-    last_bitrate_adjust = time.time()
-    current_bitrate = bitrate
     
     while True:
         try:
@@ -112,32 +111,8 @@ def capture_process_task(shm_array, current_size, ready_flag, bitrate, max_fps, 
                 if network_quality is not None:
                     network_quality.value = actual_fps
                 
-                #print(f"[子进程] 实际FPS: {actual_fps}, 当前码率: {current_bitrate}kbps")
+                print(f"[子进程] 实际FPS: {actual_fps}")
             
-            if time.time() - last_bitrate_adjust >= 3.0:
-                last_bitrate_adjust = time.time()
-                
-                if network_quality is not None:
-                    actual_fps = network_quality.value
-                    target_fps = TARGET_FPS
-                    
-                    if actual_fps < target_fps * 0.8:
-                        new_bitrate = max(MIN_BITRATE, int(current_bitrate * 0.8))
-                    elif actual_fps < target_fps * 0.9:
-                        new_bitrate = max(MIN_BITRATE, int(current_bitrate * 0.9))
-                    elif actual_fps >= target_fps * 0.95 and actual_fps < target_fps:
-                        new_bitrate = min(MAX_BITRATE, int(current_bitrate * 1.1))
-                    elif actual_fps >= target_fps:
-                        new_bitrate = min(MAX_BITRATE, int(current_bitrate * 1.2))
-                    else:
-                        new_bitrate = current_bitrate
-                    
-                    if new_bitrate != current_bitrate:
-                        current_bitrate = new_bitrate
-                        stream.bit_rate = current_bitrate * 1000
-                        stream.options['maxrate'] = str(current_bitrate * 1000)
-                        stream.options['bufsize'] = str(current_bitrate * 2000)
-                        print(f"[子进程] 动态调整码率: {current_bitrate}kbps (FPS: {actual_fps})")
             
         except Exception as e:
             print(f"[子进程循环错误] {e}")
