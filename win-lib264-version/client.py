@@ -27,7 +27,7 @@ if platform.system() == 'Windows':
         pass
 
 # ================= 配置区域 =================
-TARGET_SERVER_IP = 'your-frp.com'  # FRP地址
+TARGET_SERVER_IP = 'frp-hat.com'  # FRP地址
 TCP_PORT = 43972                  # FRP映射的公网端口
 # ===========================================
 
@@ -549,14 +549,12 @@ class P2PControllerApp:
                                     frames = codec.decode(packet)
                                     
                                     if frames:
-                                        frame = frames[0]
-                                        img = frame.to_ndarray(format='rgb24')
-                                        img = img[::-1]
+                                            frame = frames[0].reformat(format='rgb24')
+
+                                            with self.image_lock:
+                                                self.latest_frame = frame
                                         
-                                        with self.image_lock:
-                                            self.latest_frame = img
-                                        
-                                        self.perf_stats['decode'].append(time.time() - t_start)
+                                        #self.perf_stats['decode'].append(time.time() - t_start)
                                     
                                     del self.frame_buffers[fid]
                                 except Exception:
@@ -582,17 +580,52 @@ class P2PControllerApp:
             else:
                 return
         
-        h, w, _ = frame_data.shape
-        img_data = pyglet.image.ImageData(w, h, 'RGB', frame_data.tobytes(), pitch=w*3)
-        
+        frame = frame_data
+
+        w = frame.width
+        h = frame.height
+
+        plane = frame.planes[0]
+
+        buf = ctypes.c_void_p(plane.buffer_ptr)
+
         if self.texture is None or self.texture.width != w or self.texture.height != h:
-            self.texture = img_data.get_texture() 
-            self.sprite = pyglet.sprite.Sprite(self.texture, x=0, y=0)
-            self.sprite.image.anchor_x = 0
+
+            self.texture = pyglet.image.Texture.create(w, h)
+
+            gl.glBindTexture(gl.GL_TEXTURE_2D, self.texture.id)
+
+            gl.glTexImage2D(
+                gl.GL_TEXTURE_2D,
+                0,
+                gl.GL_RGB,
+                w,
+                h,
+                0,
+                gl.GL_RGB,
+                gl.GL_UNSIGNED_BYTE,
+                buf
+            )
+
+            self.sprite = pyglet.sprite.Sprite(self.texture)
+
         else:
-            self.texture.blit_into(img_data, 0, 0, 0)
+
+            gl.glBindTexture(gl.GL_TEXTURE_2D, self.texture.id)
+
+            gl.glTexSubImage2D(
+                gl.GL_TEXTURE_2D,
+                0,
+                0,
+                0,
+                w,
+                h,
+                gl.GL_RGB,
+                gl.GL_UNSIGNED_BYTE,
+                buf
+            )
             
-        self.perf_stats['render'].append(time.time())
+        #self.perf_stats['render'].append(time.time())
         self.resize_sprite()
 
     def resize_sprite(self):
@@ -602,9 +635,10 @@ class P2PControllerApp:
         
         ratio = min(win_w / tex_w, win_h / tex_h)
         self.sprite.scale = ratio
+        self.sprite.scale_y = -ratio
         
         pos_x = (win_w - tex_w * ratio) / 2
-        pos_y = (win_h - tex_h * ratio) / 2
+        pos_y = (win_h + tex_h * ratio) / 2
         self.sprite.position = (pos_x, pos_y, 0)
 
     def switch_to_desktop_ui(self):
@@ -626,7 +660,7 @@ class P2PControllerApp:
 
     def update_stats(self, dt):
         if not self.connected: return
-        self.perf_stats = {'decode': [], 'render': []}
+        #self.perf_stats = {'decode': [], 'render': []}
 
     def update_status(self, text):
         self.status_label.text = text
