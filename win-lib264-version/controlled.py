@@ -19,6 +19,10 @@ VIDEO_BITRATE = 4000
 MAX_FPS = 60
 MTU_SIZE = 1400
 SHM_BUFFER_SIZE = 500 * 1024
+CRF_VALUE = 23
+MIN_BITRATE = 4000
+MAX_BITRATE = 6000
+TARGET_FPS = 60
 # ===========================================
 
 capture_process = None
@@ -26,7 +30,7 @@ capture_process = None
 FRAME_TYPE_HEADER = 0x4A4B4C4D
 FRAME_TYPE_DATA   = 0x4A4B4C4E
 
-def capture_process_task(shm_array, current_size, ready_flag, bitrate, max_fps, width=None, height=None):
+def capture_process_task(shm_array, current_size, ready_flag, bitrate, max_fps, width=None, height=None, network_quality=None):
     print("[子进程] 初始化中...")
     
     try:
@@ -53,16 +57,23 @@ def capture_process_task(shm_array, current_size, ready_flag, bitrate, max_fps, 
         stream.options = {
             'preset': 'ultrafast',
             'tune': 'zerolatency',
+            'crf': str(CRF_VALUE),
             'g': '30',
             'bf': '0',
+            'rc-lookahead': '0',
+            'scenecut': '0',
+            'maxrate': str(bitrate * 1000),
+            'bufsize': str(bitrate * 2000),
         }
-        print(f"[子进程] Encoder OK")
+        print(f"[子进程] Encoder OK - CRF:{CRF_VALUE}, 初始码率:{bitrate}kbps")
     except Exception as e:
         print(f"[子进程错误] Encoder: {e}")
         return
 
     last_stats = time.time()
     frame_count = 0
+    last_bitrate_adjust = time.time()
+    current_bitrate = bitrate
     
     while True:
         try:
@@ -92,9 +103,41 @@ def capture_process_task(shm_array, current_size, ready_flag, bitrate, max_fps, 
                     ready_flag.value = 1
             
             frame_count += 1
+            
             if time.time() - last_stats >= 1.0:
+                actual_fps = frame_count
                 frame_count = 0
                 last_stats = time.time()
+                
+                if network_quality is not None:
+                    network_quality.value = actual_fps
+                
+                #print(f"[子进程] 实际FPS: {actual_fps}, 当前码率: {current_bitrate}kbps")
+            
+            if time.time() - last_bitrate_adjust >= 3.0:
+                last_bitrate_adjust = time.time()
+                
+                if network_quality is not None:
+                    actual_fps = network_quality.value
+                    target_fps = TARGET_FPS
+                    
+                    if actual_fps < target_fps * 0.8:
+                        new_bitrate = max(MIN_BITRATE, int(current_bitrate * 0.8))
+                    elif actual_fps < target_fps * 0.9:
+                        new_bitrate = max(MIN_BITRATE, int(current_bitrate * 0.9))
+                    elif actual_fps >= target_fps * 0.95 and actual_fps < target_fps:
+                        new_bitrate = min(MAX_BITRATE, int(current_bitrate * 1.1))
+                    elif actual_fps >= target_fps:
+                        new_bitrate = min(MAX_BITRATE, int(current_bitrate * 1.2))
+                    else:
+                        new_bitrate = current_bitrate
+                    
+                    if new_bitrate != current_bitrate:
+                        current_bitrate = new_bitrate
+                        stream.bit_rate = current_bitrate * 1000
+                        stream.options['maxrate'] = str(current_bitrate * 1000)
+                        stream.options['bufsize'] = str(current_bitrate * 2000)
+                        print(f"[子进程] 动态调整码率: {current_bitrate}kbps (FPS: {actual_fps})")
             
         except Exception as e:
             print(f"[子进程循环错误] {e}")
@@ -151,6 +194,7 @@ class P2PControlledApp:
         self.shm_array = multiprocessing.RawArray(ctypes.c_ubyte, SHM_BUFFER_SIZE)
         self.shared_size = multiprocessing.RawValue(ctypes.c_int, 0)
         self.ready_flag = multiprocessing.RawValue(ctypes.c_int, 0)
+        self.network_quality = multiprocessing.RawValue(ctypes.c_int, 0)
         
         # === UI 构建 ===
         self.setup_ui()
@@ -317,9 +361,10 @@ class P2PControlledApp:
                     capture_process.terminate()
                 self.shared_size.value = 0
                 self.ready_flag.value = 0
+                self.network_quality.value = 0
                 capture_process = multiprocessing.Process(
                     target=capture_process_task, 
-                    args=(self.shm_array, self.shared_size, self.ready_flag, VIDEO_BITRATE, MAX_FPS),
+                    args=(self.shm_array, self.shared_size, self.ready_flag, VIDEO_BITRATE, MAX_FPS, None, None, self.network_quality),
                     daemon=True
                 )
                 capture_process.start()
@@ -366,9 +411,10 @@ class P2PControlledApp:
                         if capture_process and capture_process.is_alive(): capture_process.terminate()
                         self.shared_size.value = 0
                         self.ready_flag.value = 0
+                        self.network_quality.value = 0
                         capture_process = multiprocessing.Process(
                             target=capture_process_task, 
-                            args=(self.shm_array, self.shared_size, self.ready_flag, VIDEO_BITRATE, MAX_FPS, cmd['width'], cmd['height']),
+                            args=(self.shm_array, self.shared_size, self.ready_flag, VIDEO_BITRATE, MAX_FPS, cmd['width'], cmd['height'], self.network_quality),
                             daemon=True
                         )
                         capture_process.start()
