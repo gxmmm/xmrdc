@@ -41,7 +41,9 @@ xmrdc/
 ### 1. 端口说明
 
 被控端监听本地端口 假设为5667,需要有frp服务映射到公网 暴露后如 any-frp.com:45000
+
 controlled中 TCP_LISTEN_PORT = 5667
+
 client中 TARGET_SERVER_IP= 'any-frp.com' TCP_PORT=45000
 
 ### 2. 启动被控端
