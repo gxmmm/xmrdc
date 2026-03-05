@@ -16,13 +16,12 @@ from tkinter import font as tkfont
 # ================= 配置区域 =================
 TCP_LISTEN_PORT = 5667
 VIDEO_BITRATE = 4000
-MAX_FPS = 60
+MAX_FPS = 90
 MTU_SIZE = 1400
-SHM_BUFFER_SIZE = 500 * 1024
+SHM_BUFFER_SIZE = 2 * 1024 * 1024
 CRF_VALUE = 23
 MIN_BITRATE = 4000
 MAX_BITRATE = 6000
-TARGET_FPS = 60
 # ===========================================
 
 capture_process = None
@@ -35,7 +34,10 @@ def capture_process_task(shm_array, current_size, ready_flag, bitrate, max_fps, 
     
     try:
         import dxcam
-        camera = dxcam.create(output_color="BGR")
+        camera = dxcam.create(
+            output_color="BGRA",
+            max_buffer_len=1
+        )
         camera.start(target_fps=max_fps, video_mode=True)
         frame = camera.get_latest_frame()
         if frame is None: return
@@ -78,13 +80,12 @@ def capture_process_task(shm_array, current_size, ready_flag, bitrate, max_fps, 
         try:
             frame = camera.get_latest_frame()
             if frame is None: 
-                time.sleep(0)
                 continue
             
             while ready_flag.value == 1:
                 time.sleep(0)
             
-            av_frame = av.VideoFrame.from_ndarray(frame, format='bgr24')
+            av_frame = av.VideoFrame.from_ndarray(frame, format='bgra')
             
             if av_frame.width != width or av_frame.height != height:
                 av_frame = av_frame.reformat(width=width, height=height)
@@ -429,7 +430,7 @@ class P2PControlledApp:
     def send_packet(self, sock, packet_data):
         if not self.controller_addr: return
         try:
-            self.frame_id = (self.frame_id + 1) % 99999999
+            self.frame_id = (self.frame_id + 1) & 0xFFFF
             fid = self.frame_id
             total_size = len(packet_data)
             
@@ -438,7 +439,9 @@ class P2PControlledApp:
             
             i = 0
             while i < total_size:
-                chunk = packet_data[i:i+MTU_SIZE]
+                mv = memoryview(packet_data)
+                chunk = mv[i:i+MTU_SIZE]
+                #chunk = packet_data[i:i+MTU_SIZE]
                 chunk_header = struct.pack('!IIIH', FRAME_TYPE_DATA, fid, total_size, i // MTU_SIZE)
                 sock.sendto(chunk_header + chunk, self.controller_addr)
                 i += MTU_SIZE    
