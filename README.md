@@ -30,8 +30,8 @@ xmrdc/
 ## 安装方法
 
 1. 克隆项目到本地
-
-2. 安装依赖包：
+2. (可选) 创建虚拟环境,如conda; python版本使用3.13x
+3. 安装依赖包：
    ```bash
    pip install -r requirements.txt
    ```
