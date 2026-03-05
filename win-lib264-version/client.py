@@ -27,7 +27,7 @@ if platform.system() == 'Windows':
         pass
 
 # ================= 配置区域 =================
-TARGET_SERVER_IP = 'frp-hat.com'  # FRP地址
+TARGET_SERVER_IP = 'your-frp.com'  # FRP地址
 TCP_PORT = 43972                  # FRP映射的公网端口
 # ===========================================
 
