@@ -15,7 +15,7 @@ from tkinter import font as tkfont
 
 # ================= 配置区域 =================
 TCP_LISTEN_PORT = 5667
-VIDEO_BITRATE = 6000
+VIDEO_BITRATE = 4000
 MAX_FPS = 60
 MTU_SIZE = 1400
 SHM_BUFFER_SIZE = 500 * 1024
@@ -53,7 +53,7 @@ def capture_process_task(shm_array, current_size, ready_flag, bitrate, max_fps, 
         stream.options = {
             'preset': 'ultrafast',
             'tune': 'zerolatency',
-            'g': '15',
+            'g': '30',
             'bf': '0',
         }
         print(f"[子进程] Encoder OK")
