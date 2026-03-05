@@ -29,7 +29,7 @@ capture_process = None
 FRAME_TYPE_HEADER = 0x4A4B4C4D
 FRAME_TYPE_DATA   = 0x4A4B4C4E
 
-def capture_process_task(shm_array, current_size, ready_flag, bitrate, max_fps, width=None, height=None, network_quality=None):
+def capture_process_task(shm_array, current_size, ready_event, bitrate, max_fps, width=None, height=None, network_quality=None):
     print("[子进程] 初始化中...")
     
     try:
@@ -62,8 +62,8 @@ def capture_process_task(shm_array, current_size, ready_flag, bitrate, max_fps, 
             'bf': '0',
             'refs': '1',
             'rc-lookahead': '0',
-            'g': '60',
-            'keyint_min': '60',
+            'g': '30',
+            'keyint_min': '30',
             'scenecut': '0',
             'aq-mode': '1',
             'aq-strength': '1.0'
@@ -82,8 +82,9 @@ def capture_process_task(shm_array, current_size, ready_flag, bitrate, max_fps, 
             if frame is None: 
                 continue
             
-            while ready_flag.value == 1:
-                time.sleep(0)
+            if ready_event.is_set():
+                time.sleep(0.001)
+                continue
             
             av_frame = av.VideoFrame.from_ndarray(frame, format='bgra')
             
@@ -100,7 +101,7 @@ def capture_process_task(shm_array, current_size, ready_flag, bitrate, max_fps, 
                     shm_array[0:4] = struct.pack('I', data_len)
                     shm_array[4 : 4+data_len] = packet_data
                     current_size.value = data_len
-                    ready_flag.value = 1
+                    ready_event.set()
             
             frame_count += 1
             
@@ -112,7 +113,7 @@ def capture_process_task(shm_array, current_size, ready_flag, bitrate, max_fps, 
                 if network_quality is not None:
                     network_quality.value = actual_fps
                 
-                print(f"[子进程] 实际FPS: {actual_fps}")
+                #print(f"[子进程] 实际FPS: {actual_fps}")
             
             
         except Exception as e:
@@ -169,7 +170,7 @@ class P2PControlledApp:
         # 共享内存
         self.shm_array = multiprocessing.RawArray(ctypes.c_ubyte, SHM_BUFFER_SIZE)
         self.shared_size = multiprocessing.RawValue(ctypes.c_int, 0)
-        self.ready_flag = multiprocessing.RawValue(ctypes.c_int, 0)
+        self.ready_event = multiprocessing.Event()
         self.network_quality = multiprocessing.RawValue(ctypes.c_int, 0)
         
         # === UI 构建 ===
@@ -336,11 +337,11 @@ class P2PControlledApp:
                 if capture_process and capture_process.is_alive(): 
                     capture_process.terminate()
                 self.shared_size.value = 0
-                self.ready_flag.value = 0
+                self.ready_event.clear()
                 self.network_quality.value = 0
                 capture_process = multiprocessing.Process(
                     target=capture_process_task, 
-                    args=(self.shm_array, self.shared_size, self.ready_flag, VIDEO_BITRATE, MAX_FPS, None, None, self.network_quality),
+                    args=(self.shm_array, self.shared_size, self.ready_event, VIDEO_BITRATE, MAX_FPS, None, None, self.network_quality),
                     daemon=True
                 )
                 capture_process.start()
@@ -386,11 +387,11 @@ class P2PControlledApp:
                         global capture_process
                         if capture_process and capture_process.is_alive(): capture_process.terminate()
                         self.shared_size.value = 0
-                        self.ready_flag.value = 0
+                        self.ready_event.clear()
                         self.network_quality.value = 0
                         capture_process = multiprocessing.Process(
                             target=capture_process_task, 
-                            args=(self.shm_array, self.shared_size, self.ready_flag, VIDEO_BITRATE, MAX_FPS, cmd['width'], cmd['height'], self.network_quality),
+                            args=(self.shm_array, self.shared_size, self.ready_event, VIDEO_BITRATE, MAX_FPS, cmd['width'], cmd['height'], self.network_quality),
                             daemon=True
                         )
                         capture_process.start()
@@ -411,10 +412,10 @@ class P2PControlledApp:
         
         while self.is_connected and self.running:
             try:
-                if self.ready_flag.value == 1:
+                if self.ready_event.is_set():
                     actual_len = struct.unpack('I', mv[0:4])[0]
                     packet_data = mv[4 : 4+actual_len]
-                    self.ready_flag.value = 0
+                    self.ready_event.clear()
                     
                     self.send_packet(send_socket, packet_data)
                     
@@ -423,7 +424,7 @@ class P2PControlledApp:
                         self.update_stats(frame_count)
                         frame_count = 0; last_stats = time.time()
                 else:
-                    time.sleep(0)
+                    time.sleep(0.001)
             except Exception as e:
                 print(f"[发送错误] {e}")
             
@@ -438,10 +439,9 @@ class P2PControlledApp:
             sock.sendto(header, self.controller_addr)
             
             i = 0
+            mv = memoryview(packet_data)
             while i < total_size:
-                mv = memoryview(packet_data)
                 chunk = mv[i:i+MTU_SIZE]
-                #chunk = packet_data[i:i+MTU_SIZE]
                 chunk_header = struct.pack('!IIIH', FRAME_TYPE_DATA, fid, total_size, i // MTU_SIZE)
                 sock.sendto(chunk_header + chunk, self.controller_addr)
                 i += MTU_SIZE    
